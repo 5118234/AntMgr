@@ -10,7 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
-using Autofac.Aspect;
+using System.Transactions;
 using DbModel;
 using Repository.Interceptors;
 using ViewModels.Reuqest;
@@ -21,7 +21,6 @@ namespace Repository
     /// 角色权限管理
     /// </summary>
     [Component]
-    [Aspect(InterceptorType.Interface)]
     public class RoleRespository : BaseRepository<SystemRole>, IRoleRespository
     {
         /// <summary>
@@ -29,7 +28,8 @@ namespace Repository
         /// </summary>
         /// <param name="model"></param>
         /// <returns></returns>
-        public async Task<string> AddRoleActions(RoleAction model)
+        [EnableTransactionScope]
+        public async Task<string> UseTransactionAddRoleActions(RoleAction model)
         {
             if (model == null || model.MenuId < 1 || string.IsNullOrEmpty(model.ActionId)) return Tip.BadRequest;
             await this.Entitys.SystemPageAction.Where(r => r.MenuTid.Equals(model.MenuId) && r.ActionId.Equals(model.ActionId)).DeleteAsync();
@@ -90,13 +90,7 @@ namespace Repository
             }
 
             var rt = this.Entity.Where(r => r.Tid.Equals(tid)).Delete() > 0;
-            if (!rt)
-            {
-                return Tip.UpdateError;
-            }
-
-            return string.Empty;
-
+            return !rt ? Tip.UpdateError : string.Empty;
         }
 
         /// <summary>
@@ -144,7 +138,7 @@ namespace Repository
         /// <param name="role"></param>
         /// <returns></returns>
         [EnableTransactionScope]
-        public async Task<string> AddRole(AddRoleVm role, Token user)
+        public async Task<string> UseTransactionAddRole(AddRoleVm role, Token user)
         {
             if (role == null)
             {
@@ -214,6 +208,7 @@ namespace Repository
 
                 if (!updateResult)
                 { 
+                    Transaction.Current.Rollback();
                     return Tip.UpdateError;
                 }
 

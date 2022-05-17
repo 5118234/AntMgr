@@ -8,13 +8,10 @@ using Newtonsoft.Json;
 using Repository.Interface;
 using ServicesModel;
 using System;
-using System.Collections.Concurrent;
 using System.Collections.Generic;
-using System.IO;
+using System.Data;
 using System.Linq;
 using System.Reflection;
-using Autofac.Aspect;
-using Repository.Interceptors;
 using ViewModels.Reuqest;
 
 namespace Repository
@@ -23,30 +20,92 @@ namespace Repository
     /// 公共处理
     /// </summary>
     [Component]
-    [Aspect(InterceptorType.Interface)]
     public class CommonRespository : BaseRepository, ICommonRespository
     {
-
-        private static string _dbTableAndColumnsCache = string.Empty;
+        
+        /// <summary>
+        /// 给codegen使用
+        /// </summary>
         private static List<CodeGenTable> _dbTableCache = null;
-        private static readonly ConcurrentDictionary<string, List<CodeGenField>> _dbColumnsCache = new ConcurrentDictionary<string, List<CodeGenField>>();
 
+
+        #region SQL
+
+        /// <summary>
+        /// 执行sql语句返回DataTable
+        /// 支持多数据库配置
+        /// </summary>
+        /// <param name="db"></param>
+        /// <param name="sql"></param>
+        /// <returns></returns>
+        public DataTable SelectSqlExcute(string db,string sql)
+        {
+            if (string.IsNullOrEmpty(sql))
+            {
+                return new DataTable();
+            }
+            db = db.Split('[')[0];
+            return this.EmptyDB(db).QueryTable(sql);
+        }
+
+        /// <summary>
+        /// 执行sql语句返回受影响条数
+        /// 支持多数据库配置
+        /// </summary>
+        /// <param name="db"></param>
+        /// <param name="sql"></param>
+        /// <returns></returns>
+        public Tuple<int, string> SQLExcute(string db,string sql)
+        {
+            int result = -1;
+            if (string.IsNullOrEmpty(sql))
+            {
+                return new Tuple<int, string>(-1, Tip.BadRequest);
+            }
+
+            db = db.Split('[')[0];
+            try
+            {
+                this.EmptyDB(db).UseTransaction(con =>
+                {
+                    result = con.Execute(sql);
+                    return true;
+                });
+
+            }
+            catch (Exception ex)
+            {
+                return new Tuple<int, string>(-1, ex.Message);
+            }
+            if (result == -1)
+            {
+                return new Tuple<int, string>(result, "请使用Select按钮查询！");
+            }
+            return new Tuple<int, string>(result, string.Empty);
+        }
+
+        #endregion
 
         /// <summary>
         /// 获取所有的Table和Columns
+        /// 从db里面获取最新的数据 要不要缓存?
         /// </summary>
         /// <returns></returns>
-        public string GetDbTablesAndColumns()
+        public string GetDbTablesAndColumns(string dbName)
         {
-            if (!string.IsNullOrEmpty(_dbTableAndColumnsCache)) return _dbTableAndColumnsCache;
+            var arr = dbName.Split('[');
+            var db = arr[0];
+            var provider = arr[1].Replace("]",""); 
             Dictionary<string, List<string>> result = new Dictionary<string, List<string>>();
-            List<string> tables = this.DB.Query<string>("show tables").ToList();
+            //mysql 和 sqlserver 不一样
+            List<string> tables = provider.Equals("Mysql") ?  this.EmptyDB(db).Query<string>("show tables").ToList():
+                this.EmptyDB(db).Query<string>("select name from sys.Tables where type ='U'").ToList();
             foreach (var table in tables)
             {
-                var columns = getAllFields(table);
+                var columns = getAllFields(db,provider,table);
                 result.Add(table, columns);
             }
-            _dbTableAndColumnsCache = JsonConvert.SerializeObject(result);
+            var _dbTableAndColumnsCache = JsonConvert.SerializeObject(result);
             return _dbTableAndColumnsCache;
         }
 
@@ -61,27 +120,24 @@ namespace Repository
                 return _dbTableCache;
             }
             _dbTableCache = this.GetDbTabless();
+            //可能会配置有多个db
             return _dbTableCache;
         }
 
         /// <summary>
         /// 获取表下面所有的字段
         /// </summary>
+        /// <param name="dbName"></param>
         /// <param name="tableName"></param>
         /// <returns></returns>
-        public List<CodeGenField> GetDbTablesColumns(string tableName)
+        public List<CodeGenField> GetDbTablesColumns(string dbName, string tableName)
         {
-            if (_dbColumnsCache.TryGetValue(tableName, out var cache)) return cache;
-            cache = this.GetDbModels(tableName);
-            _dbColumnsCache.TryAdd(tableName, cache);
+            var key = (string.IsNullOrEmpty(dbName) ? "" : dbName + ".") + tableName;
+            if (_dbColumnsCache.TryGetValue(key, out var cache)) return cache;
+            cache = this.GetDbModels(dbName, tableName);
+            _dbColumnsCache.TryAdd(key, cache);
             return cache;
         }
-
-
-
-
-
-
 
         /// <summary>
         /// 自动生成代码
@@ -93,16 +149,14 @@ namespace Repository
             return GeneratorCodeHelper.CodeGenerator(model.TableName, model.Columns);
         }
 
-
         /// <summary>
-        /// 获取表里面所有的字段
+        /// 获取appsettings.json里面配置的所有字符串
         /// </summary>
-        /// <param name="tableName"></param>
         /// <returns></returns>
-        private List<string> getAllFields(string tableName)
+        public List<string> GetDbs()
         {
-            var columns = this.DB.Query<string>(" SHOW COLUMNS FROM " + tableName).ToList();
-            return columns;
+            var allData = DbModel.DbContext.GetAllDbMappingList().Select(r=>r.Item2+"["+(r.Item1.Contains("Mysql")?"Mysql":"Sqlserver") +"]");//获取数据
+            return allData.ToList();
         }
 
 
@@ -144,6 +198,7 @@ namespace Repository
                     }
                     result.Add(new CodeGenTable
                     {
+                        DbName = tart.Db,
                         Name = tt.Name,
                         TableName = tart.Name,
                         Comment = comment.Replace(",", "").Replace("→", "")
@@ -159,41 +214,30 @@ namespace Repository
             return result;
         }
 
+
         /// <summary>
-        /// 获取所有的DBClass
+        /// 获取表里面所有的字段
         /// </summary>
-        private List<CodeGenField> GetDbModels(string tableName)
+        /// <param name="db"></param>
+        /// <param name="provider"></param>
+        /// <param name="tableName"></param>
+        /// <returns></returns>
+        private List<string> getAllFields(string db,string provider,string tableName)
         {
-            var modelAss = AppDomain.CurrentDomain.GetAssemblies().FirstOrDefault(assembly => (assembly.GetName().Name.Equals("DbModel")));
-            if (modelAss == null)
+            if (provider.Equals("Mysql"))
             {
-                throw new ArgumentException("assemblys");
+                var columns = this.EmptyDB(db).Query<string>(" SHOW COLUMNS FROM " + tableName).ToList();
+                return columns;
             }
-            var types = modelAss.GetExportedTypes();
-            var targetClass = (from t in types
-                               where t.BaseType == typeof(LinqToDBEntity) &&
-                                          !t.IsAbstract &&
-                                          !t.IsInterface && t.Name.Equals(tableName)
-                               select t).FirstOrDefault();
-
-            if (targetClass == null)
+            else
             {
-                throw new ArgumentException("targetClass");
-            }
-            
-            var properties = targetClass.GetProperties(BindingFlags.Instance | BindingFlags.Public | BindingFlags.Static).Where(e => e.CanWrite).ToArray();
+                var sql = @"select COLUMN_NAME
+                from INFORMATION_SCHEMA.COLUMNS
+                    where TABLE_NAME = @Name ";
 
-            var result = (from item in properties
-                          let r = item.GetCustomAttribute<ColumnAttribute>()
-                          select new CodeGenField
-                          {
-                              Name = item.Name,
-                              FieldName = r.Name,
-                              Comment = string.IsNullOrEmpty(r.Comment) ? "" : r.Comment.Replace(",", "").Replace("→", "")
-                          }).ToList();
-            return result.OrderBy(r => r.Name).ToList();
+               return this.EmptyDB(db).Query<string>(sql,new {Name = tableName }).ToList();
+            }
         }
-
 
     }
 }

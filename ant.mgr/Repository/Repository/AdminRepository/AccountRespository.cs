@@ -11,7 +11,6 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
-using Autofac.Aspect;
 using DbModel;
 using Repository.Interceptors;
 using ViewModels.Reuqest;
@@ -22,7 +21,6 @@ namespace Repository
     /// 系统用户
     /// </summary>
     [Component]
-    [Aspect(InterceptorType.Interface)]
     public class AccountRespository : BaseRepository<SystemUsers>, IAccountRespository
     {
 
@@ -58,7 +56,7 @@ namespace Repository
                                                where u.Eid.Equals(info.eid)
                                                select new { user = u, role = ro }).FirstOrDefaultAsync();
 
-                var systemUser = systemUserAndRole != null ? systemUserAndRole.user : null;
+                var systemUser = systemUserAndRole?.user;
 
                 if (systemUser == null)
                 {
@@ -70,19 +68,14 @@ namespace Repository
                     return new Tuple<bool, string>(false, "该账号已被禁用,请联系系统管理员!");
                 }
 
-                var role = systemUserAndRole.role;
-                if (role == null)
-                {
-                    role = new SystemRole();
-                }
+                var role = systemUserAndRole.role ?? new SystemRole();
 
                 var loginIp = WebUtils.GetClientIP();
                 var userAgent = WebUtils.GetUserAgent();
-                var eid = info.eid.ToLower();
 
 
                 //更新
-                var updateQuery = this.Entity.Where(r => r.Eid.Equals(eid))
+                var updateQuery = this.Entity.Where(r => r.Eid.Equals(systemUser.Eid))
                     .Set(r => r.LoginIp, loginIp)
                     .Set(r => r.LastLoginTime, DateTime.Now)
                     .Set(r => r.UserAgent, userAgent);
@@ -104,7 +97,7 @@ namespace Repository
                 WriteLoginCookie(new Token
                 {
                     Code = systemUser.UserName,
-                    Eid = eid,
+                    Eid = systemUser.Eid,
                     MenuRights = systemUser.MenuRights,
                     RoleTid = role.Tid,
                     RoleName = role.RoleName,
@@ -176,8 +169,7 @@ namespace Repository
                       Phone = u.Phone,
                       CreateUser = u.CreateUser
                   })
-                .DynamicOrderBy(string.IsNullOrEmpty(model.OrderBy) ? "DataChangeLastTime" : model.OrderBy,
-                            model.OrderSequence)
+                .DynamicOrderBy(string.IsNullOrEmpty(model.OrderBy) ? "DataChangeLastTime" : model.OrderBy,model.OrderSequence)
                             .Skip((model.PageIndex - 1) * model.PageSize)
                             .Take(model.PageSize)
                             .ToListAsync();
@@ -222,11 +214,7 @@ namespace Repository
                  .Set(r => r.CreateRoleName, "," + string.Join(",", createRoleList) + ",")
                  .UpdateAsync() > 0;
 
-            if (!updateResult)
-            {
-                return new Tuple<bool, string>(false, Tip.UpdateError);
-            }
-            return new Tuple<bool, string>(true, string.Empty);
+            return !updateResult ? new Tuple<bool, string>(false, Tip.UpdateError) : new Tuple<bool, string>(true, string.Empty);
         }
 
         /// <summary>
@@ -327,12 +315,7 @@ namespace Repository
             info.CreateUser = user.Eid;
 
             var inertResult = DB.Insert(info) > 0;
-            if (!inertResult)
-            {
-                return new Tuple<bool, string>(false, Tip.SystemError);
-            }
-
-            return new Tuple<bool, string>(true, string.Empty);
+            return !inertResult ? new Tuple<bool, string>(false, Tip.SystemError) : new Tuple<bool, string>(true, string.Empty);
         }
 
         /// <summary>
@@ -376,8 +359,7 @@ namespace Repository
 
             var rt = await query.UpdateAsync() > 0;
 
-            if (!rt) return Tip.UpdateError;
-            return string.Empty;
+            return !rt ? Tip.UpdateError : string.Empty;
         }
 
         /// <summary>
@@ -405,8 +387,7 @@ namespace Repository
 
             var newPwd = CodingUtils.MD5(user.Pwd);
             var rt = this.Entity.Where(r => r.Eid.Equals(user.Eid)).Set(r => r.DataChangeLastTime, DateTime.Now).Set(r => r.Pwd, newPwd).Update() > 0;
-            if (!rt) return Tip.UpdateError;
-            return string.Empty;
+            return !rt ? Tip.UpdateError : string.Empty;
         }
 
         private void GetRoleName(SystemRole role, List<long> roleList)
